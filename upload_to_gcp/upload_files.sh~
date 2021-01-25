@@ -1,0 +1,4 @@
+gcloud auth activate-service-account --key-file $1
+working_folder=$1
+bucket=$2
+gsutil cp -r $working_folder gs://$bucket

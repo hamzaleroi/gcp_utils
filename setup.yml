@@ -1,0 +1,114 @@
+---
+- name: make the hosts accessible from the outside
+  hosts: all
+  gather_facts: no
+  vars:
+    username: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          63653038373633323836313031313765643234643039636630393736623534333232343137626166
+          6362343232363038363834363166376333336235353164370a633532393130313431303365373364
+          39346236343234366261353639356463363030383331356436663262333131323234643333363666
+          3738396438353637330a626235353865343261396466653537383138336261366337366365383133
+          6338
+
+    password: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          38363739363062626336356338303735306432353335383135663531636331653532613630373866
+          6437393563316134333661626562336139333262653531360a353966643239356432313833366136
+          65356235373238353839343337633363393366636163623634316631373439363031626262333965
+          6530303630623063640a336638636332313136643032613461323531376532306562386461363332
+          38343839343536326361613934616239316632343765663739666336663631623635
+
+  tasks:
+    - name: create the user ansible
+      become: true
+      user:
+        name: "{{username}}"
+        state: present
+        password: "{{ password | string | password_hash('sha512')}}"
+        create_home: yes
+        group: sudo
+    - name: generate rsa keys
+      become: true
+      user:
+        name: "{{username}}"
+        generate_ssh_key: yes
+        ssh_key_bits: 1024
+        ssh_key_file: "/home/{{username}}/.ssh/id_rsa"
+      notify: 
+        - set rsa key
+        - set authorized keys
+        - restart ssh
+    - name: fetching public keys
+      tags: fetching
+      become: yes
+      fetch:
+        src: "/home/{{username}}/.ssh/id_rsa.pub"
+        dest: "./public_keys/{{inventory_hostname}}.pub"
+        flat: yes
+    - name: deleting the file
+      tags: deleting
+      delegate_to: localhost
+      file:
+        path: "~/.ssh/known_hosts"
+        state: absent
+    - name: assembling keys in one file
+      tags: assembling
+      delegate_to: localhost
+      assemble:
+        src: "./public_keys/"
+        regexp: "pub$"
+        dest: "~/.ssh/known_hosts"
+    - name: copying localhost's rsa keys
+      tags:
+        - copy
+      become: yes
+      copy:
+        src: "~/.ssh/id_rsa.pub"
+        dest: "/home/{{username}}/.ssh/authorized_keys"
+      notify:
+        - set authorized keys
+        - restart ssh
+      
+    - name: gathering facts
+      tags: gather
+      setup:
+        filter: "ansible_eth1"
+      register: out
+    - name: registering data
+      tags: register
+      delegate_to: localhost
+      copy:
+        content: "ansible_host: {{out.ansible_facts.ansible_eth1.ipv4.address}}\nansible_port: 22"
+        dest: "./host_vars/{{inventory_hostname}}"
+      notify:
+        - create global inventory file
+  handlers:
+    - name:  create global inventory file
+      delegate_to: localhost
+      tags: assemble
+      vars:
+        hosts: "{{hostvars}}"
+        user: "{{username}}"
+      template:
+        src: "./hosts.j2"
+        dest: "./hosts.ini"
+        force: yes
+    - name: set rsa key
+      become: yes
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^HostKey /etc/ssh/ssh_host_rsa_key"
+        line: "HostKey /home/{{username}}/.ssh/id_rsa"
+    - name: set authorized keys 
+      become: yes
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        insertbefore: "#AuthorizedKeysFile"
+        firstmatch: yes
+        line: "AuthorizedKeysFile     /home/{{username}}/.ssh/authorized_keys"
+    - name: restart ssh
+      become: yes
+      service:
+        name: ssh
+        state: restarted
